@@ -1,113 +1,158 @@
 package ru.levelp.Server;
+/**
+Многопоточный чат клиент c возможностью:
+ - отправки сообщений в личку @name:text
+ - получения истории сообщений @S:g из базы данных, отсортированных по времени
+ */
+import com.google.gson.Gson;
+import ru.levelp.dao.MessageService;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
+import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketException;
+import java.util.ArrayList;
+import java.util.List;
 
-public class ClientHandler extends Thread {
-    private Socket socket;
-    private SenderWorker senderWorker;
-    private ServerExample server;
-    //Имя клиента
-    private String nickName;
-    private boolean isRegistered = false;
+public class ServerExample {
+    //Список клиентов
+    private ArrayList<ClientHandler> clients = new ArrayList<ClientHandler>();
+    //Уникальные id клиентов(Временные имена клиентов)
+    private int id;
+    //Имя сервера
+    private String name = "S";
+    //Класс который отправляет сообщения всем клиентам в отдельном потоке
+    public MultipleSenderWorker multiSendWorker;
+    public Gson gson=new Gson();
 
+    private MessageService messageService = new MessageService();
 
-
-    public ClientHandler(ServerExample server, Socket socket,int id) {
-        this.server = server;
-        this.socket = socket;
-        //Временное имя клиента
-        nickName = ""+id;
+    public static void main(String[] args) {
+        new ServerExample().start();
     }
 
-    public String getNickName() {
-        return nickName;
-    }
-
-    @Override
-    public void run() {
+    private void start() {
         try {
-            //Создание читателей, писателей из потока
-            BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(socket.getInputStream()));
-            PrintWriter writer = new PrintWriter(socket.getOutputStream());
-            //Создание отправителя в отдельном потоке
-            senderWorker = new SenderWorker(writer, server.gson);
-            senderWorker.start();
+            //Создание сокета
+            ServerSocket serverSocket = new ServerSocket(7071);
 
-            String inputMessage;
 
-            inputMessage = "Здравствуйте. Введите ваше имя для чата";
-            Message message = new Message("Сервер",nickName,inputMessage);
-            sendMessage(message);
+            multiSendWorker = new MultipleSenderWorker(this,clients);
+            multiSendWorker.start();
 
-            //Регистрация имени польователя
-            while (!isRegistered){
+            String serverMessage="Сервер запущен...";
+            //Вывод сообщения на консоль
+            printMessage(serverMessage);
 
-                inputMessage = reader.readLine();
-                message = server.gson.fromJson(inputMessage, Message.class);
-                inputMessage = message.getBody();
 
-                //Проверяем имя на уникальность
-                if(server.isNameFree(inputMessage)){
-                    nickName = inputMessage;
-                    inputMessage = "Поздравляем. Ваше имя в чате: "+inputMessage;
-                    message = new Message("Сервер",nickName,inputMessage);
-                    sendMessage(message);
-                    isRegistered=true;
-                }
-                else{
-                    inputMessage = "Извините, но имя уже занято. Введите новое ";
-                    message = new Message("Сервер",nickName,inputMessage);
-                    sendMessage(message);
-                }
+            //Принимаем клиентский сокет, отправляем его обрабатываться в отдельный поток, добавляем этот поток
+            // в коллекцию. Затем возвращаемся назад и ждем нового клиента.
+            while (true) {
+                Socket clientSocket = serverSocket.accept();
+                ClientHandler clientHandler = new ClientHandler(this, clientSocket,id++);
+                clientHandler.start();
+                clients.add(clientHandler);
             }
-            inputMessage=nickName+" присоединился к нашему чату";
-            //Отправка сообщения всем
-            server.multiSendWorker.addMessage(new Message("Сервер",null,inputMessage));
-
-            ////////////////////////////////////////////////////////////////////////////////////////////////
-            boolean socketNotNull = true;
-            //Чтение сокета клиента и получение от него сообщений
-            while (socketNotNull){
-
-                try{
-                    inputMessage = reader.readLine();
-                    if(!(inputMessage==null)){
-                        server.parseMessage(inputMessage,this);
-                    }
-
-                }
-                catch (SocketException e){
-
-                    inputMessage="Пользователь "+nickName+" отключился от чата";
-                    server.multiSendWorker.addMessage(new Message("Сервер",null,inputMessage));
-                    socketNotNull = false;
-                }
-
-
-            }
-            //Удаление пользователя из коллекции. Закрытие потока отправителя(senderWorker),
-            //(writer), (reader) и сокета
-            server.disconnectClient(this);
-            senderWorker.stopWorker();
-            writer.close();
-            reader.close();
-            socket.close();
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    public void sendMessage(Message message) {
+    //Метод отправки личного сообщения для клиента
+    public void sendToClient(Message message) {
+        //Перебираем коллекцию и ищем сходство поля Получатель(getReceiver()) в объекте message и
+        // имени клиента (getNickName())
+        for (ClientHandler c : clients) {
+            if (c.getNickName().equals(message.getReceiver())) {
+                //Добавление сообщения в "приоритетную очередь" для конкретного клиента
+                c.sendMessage(message);
+            }
+        }
+    }
+    public void sendToClientHistory(Message message,String client) {
+        //Перебираем коллекцию и ищем сходство поля Получатель(getReceiver()) в объекте message и
+        // имени клиента (getNickName())
+        for (ClientHandler c : clients) {
+            if (c.getNickName().equals(client)) {
+                //Добавление сообщения в очередь для конкретного клиента
+                c.sendMessage(message);
+            }
+        }
+    }
 
-        senderWorker.addMessage(message);
+    //Проведение необходимых процедур для отключения клиента
+    public void disconnectClient(ClientHandler clientHandler) {
+        //Удаления клиента из коллекции
+        clients.remove(clientHandler);
+    }
+    //Парсинг сообщения из Json-a и отправка его нужным пользователям
+    public void parseMessage(String inputMessage, ClientHandler clientHandler){
+        //Получение объекта из строки Json-a
+        Message message = gson.fromJson(inputMessage, Message.class);
+        //Вручную задаем Отправителя (setSender)т.к. объект Client не знает своего собственного имени
+        message.setSender(clientHandler.getNickName());
+
+
+        //Если поле Получателя пустое - отправляем всем, иначе - конкретному клиенту
+        //Если получатель не является сервером, то сохраняем сообщение в бд messageService.addMessage()
+        if(message.getReceiver()==null){
+            multiSendWorker.addMessage(message);
+            //Сохраняем сообщение в БД
+            messageService.addMessage(message);
+        }
+        else{
+            if(message.getReceiver().equals(name)){
+                //Получаем историю сообщений
+                requestToServer(message);
+            }
+            else{
+                sendToClient(message);
+                //Сохраняем сообщение в БД
+                messageService.addMessage(message);
+            }
+
+        }
+
+
 
     }
 
+    //Запрос серверу, если получателем указан сервер
+    private void requestToServer(Message message) {
+
+        List<Message> list = new ArrayList<Message>();
+        //Если запрос getHistory
+        if(message.getBody().equals("g")){
+            //Получаем коллекцию сообщений пользователя
+            list = (ArrayList<Message>) messageService.getHistory(message.getSender());
+
+            sendToClient(new Message("Server",message.getSender(),"Ваша история сообщений "));
+
+
+            //Перебираем коллекцию и отправляем сообщение клиенту
+            for(int i =0; i<list.size();i++){
+
+                sendToClientHistory(list.get(i),message.getSender());
+
+            }
+            sendToClient(new Message("Server",message.getSender()," Конец истории сообщений"));
+        }
+
+    }
+
+    //Проверка уникальности имени. Если имя свободно, то возвращается true
+    public boolean isNameFree(String name){
+        for (ClientHandler c : clients) {
+            //Сравниваем имена ClientHandler-ов с данным именем
+            if (c.getNickName().equals(name)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+    //Вывод сообщения на консоль
+    public void printMessage(String message){
+        System.out.println(message);
+    }
 
 }
