@@ -32,6 +32,7 @@ public class ClientExample {
             //Создание получателя сообщений в отдельном потоке
             ClientReceiver clientReceiver = new ClientReceiver( serverReader,gson);
             clientReceiver.start();
+            System.out.println("Здравствуйте. Введите ваше имя для чата");
             //Чтение потока ввода с консоли
             while (!(inputConsole = console.readLine()).equals("exit")&inputConsole!="") {
                 //Превращение строки в объект Message
